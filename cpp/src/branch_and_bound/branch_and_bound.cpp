@@ -308,8 +308,16 @@ template <typename i_t, typename f_t>
 void branch_and_bound_t<i_t, f_t>::report_heuristic(f_t obj)
 {
   if (is_running_) {
-    f_t user_obj         = compute_user_objective(original_lp_, obj);
-    f_t user_lower       = compute_user_objective(original_lp_, get_lower_bound());
+    f_t user_obj   = compute_user_objective(original_lp_, obj);
+    f_t lower      = get_lower_bound();
+    f_t user_lower = std::isfinite(lower) ? compute_user_objective(original_lp_, lower) : -inf;
+    if (exploration_stats_.nodes_explored == 0) {
+      f_t root_progress = root_lp_current_lower_bound_.load();
+      if (std::isfinite(root_progress) &&
+          (!std::isfinite(user_lower) || root_progress > user_lower)) {
+        user_lower = root_progress;
+      }
+    }
     std::string user_gap = user_mip_gap<f_t>(user_obj, user_lower);
 
     settings_.log.printf(
