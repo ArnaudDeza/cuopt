@@ -285,8 +285,9 @@ branch_and_bound_t<i_t, f_t>::branch_and_bound_t(
   }
 #endif
 
-  upper_bound_    = inf;
-  root_objective_ = std::numeric_limits<f_t>::quiet_NaN();
+  upper_bound_                 = inf;
+  root_objective_              = std::numeric_limits<f_t>::quiet_NaN();
+  root_lp_current_lower_bound_ = -inf;
 }
 
 template <typename i_t, typename f_t>
@@ -321,9 +322,20 @@ void branch_and_bound_t<i_t, f_t>::report_heuristic(f_t obj)
       user_gap.c_str(),
       toc(exploration_stats_.start_time));
   } else {
-    settings_.log.printf("New solution from primal heuristics. Objective %+.6e. Time %.2f\n",
-                         compute_user_objective(original_lp_, obj),
-                         toc(exploration_stats_.start_time));
+    if (solving_root_relaxation_.load()) {
+      f_t user_obj         = compute_user_objective(original_lp_, obj);
+      f_t user_lower       = root_lp_current_lower_bound_.load();
+      std::string user_gap = user_mip_gap<f_t>(user_obj, user_lower);
+      settings_.log.printf(
+        "New solution from primal heuristics. Objective %+.6e. Gap %s. Time %.2f\n",
+        user_obj,
+        user_gap.c_str(),
+        toc(exploration_stats_.start_time));
+    } else {
+      settings_.log.printf("New solution from primal heuristics. Objective %+.6e. Time %.2f\n",
+                           compute_user_objective(original_lp_, obj),
+                           toc(exploration_stats_.start_time));
+    }
   }
 }
 
@@ -712,6 +724,12 @@ void branch_and_bound_t<i_t, f_t>::set_final_solution(mip_solution_t<i_t, f_t>& 
                        obj,
                        is_maximization ? "Upper" : "Lower",
                        user_bound);
+  {
+    const f_t root_lp_obj = root_lp_current_lower_bound_.load();
+    if (std::isfinite(root_lp_obj)) {
+      settings_.log.printf("Root LP dual objective (last): %.16e\n", root_lp_obj);
+    }
+  }
 
   if (gap <= settings_.absolute_mip_gap_tol || gap_rel <= settings_.relative_mip_gap_tol) {
     solver_status_ = mip_status_t::OPTIMAL;
@@ -1946,6 +1964,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
   log.log_prefix                      = settings_.log.log_prefix;
   solver_status_                      = mip_status_t::UNSET;
   is_running_                         = false;
+  root_lp_current_lower_bound_        = -inf;
   exploration_stats_.nodes_unexplored = 0;
   exploration_stats_.nodes_explored   = 0;
   original_lp_.A.to_compressed_row(Arow_);
@@ -2001,15 +2020,19 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
                  });
   }
 
-  i_t original_rows                     = original_lp_.num_rows;
-  simplex_solver_settings_t lp_settings = settings_;
-  lp_settings.inside_mip                = 1;
-  lp_settings.scale_columns             = false;
-  lp_settings.concurrent_halt           = get_root_concurrent_halt();
+  i_t original_rows                           = original_lp_.num_rows;
+  simplex_solver_settings_t lp_settings       = settings_;
+  lp_settings.inside_mip                      = 1;
+  lp_settings.scale_columns                   = false;
+  lp_settings.concurrent_halt                 = get_root_concurrent_halt();
+  lp_settings.dual_simplex_objective_callback = [this](f_t user_obj) {
+    root_lp_current_lower_bound_.store(user_obj);
+  };
   std::vector<i_t> basic_list(original_lp_.num_rows);
   std::vector<i_t> nonbasic_list;
   basis_update_mpf_t<i_t, f_t> basis_update(original_lp_.num_rows, settings_.refactor_frequency);
   lp_status_t root_status;
+  solving_root_relaxation_ = true;
 
   if (!enable_concurrent_lp_root_solve()) {
     // RINS/SUBMIP path
@@ -2033,6 +2056,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
                                         nonbasic_list,
                                         edge_norms_);
   }
+  solving_root_relaxation_               = false;
   exploration_stats_.total_lp_iters      = root_relax_soln_.iterations;
   exploration_stats_.total_lp_solve_time = toc(exploration_stats_.start_time);
 
