@@ -23,6 +23,7 @@ namespace cython {
 
 using gpu_buffer = std::unique_ptr<rmm::device_buffer>;
 using cpu_buffer = std::vector<double>;
+using cpu_int_buffer = std::vector<int>;
 
 // LP solution struct — GPU and CPU solutions use the same struct, differing only in the
 // vector storage type (device_buffer vs std::vector).  The solutions_ variant holds all
@@ -110,6 +111,31 @@ struct mip_ret_t {
   int simplex_iterations_{};
 
   bool is_gpu() const { return std::holds_alternative<gpu_buffer>(solution_); }
+};
+
+// Host-side batch LP result used by the Python research entrypoint for the
+// shared-A / new-bounds PDLP path.
+struct linear_programming_batch_ret_t {
+  cpu_buffer primal_solution_;
+  cpu_buffer dual_solution_;
+  cpu_buffer reduced_cost_;
+
+  cpu_int_buffer termination_status_;
+  error_type_t error_status_{};
+  std::string error_message_;
+
+  cpu_buffer l2_primal_residual_;
+  cpu_buffer l2_dual_residual_;
+  cpu_buffer primal_objective_;
+  cpu_buffer dual_objective_;
+  cpu_buffer gap_;
+  cpu_int_buffer nb_iterations_;
+  cpu_int_buffer solved_by_pdlp_;
+
+  int batch_size_{};
+  int primal_size_{};
+  int dual_size_{};
+  double solve_time_{};
 };
 
 }  // namespace cython

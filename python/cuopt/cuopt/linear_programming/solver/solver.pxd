@@ -178,6 +178,25 @@ cdef extern from "cuopt/linear_programming/utilities/cython_solve.hpp" namespace
         bool solved_by_pdlp_
         bool is_gpu()
 
+    cdef cppclass linear_programming_batch_ret_t:
+        vector[double] primal_solution_
+        vector[double] dual_solution_
+        vector[double] reduced_cost_
+        vector[int] termination_status_
+        error_type_t error_status_
+        string error_message_
+        vector[double] l2_primal_residual_
+        vector[double] l2_dual_residual_
+        vector[double] primal_objective_
+        vector[double] dual_objective_
+        vector[double] gap_
+        vector[int] nb_iterations_
+        vector[int] solved_by_pdlp_
+        int batch_size_
+        int primal_size_
+        int dual_size_
+        double solve_time_
+
     # Unified MIP solution struct — solution_ variant accessed via helpers
     cdef cppclass mip_ret_t:
         mip_termination_status_t termination_status_
@@ -208,6 +227,14 @@ cdef extern from "cuopt/linear_programming/utilities/cython_solve.hpp" namespace
     cdef pair[vector[unique_ptr[solver_ret_t]], double] call_batch_solve( # noqa
         vector[data_model_view_t[int, double] *] data_models,
         solver_settings_t[int, double]* solver_settings,
+    ) except +
+
+    cdef unique_ptr[linear_programming_batch_ret_t] call_new_bounds_batch_solve(
+        data_model_view_t[int, double]* data_model,
+        solver_settings_t[int, double]* solver_settings,
+        const vector[int]& new_bounds_idx,
+        const vector[double]& new_bounds_lower,
+        const vector[double]& new_bounds_upper,
     ) except +
 
 # Variant helper functions — Cython can't call std::get directly, so we use

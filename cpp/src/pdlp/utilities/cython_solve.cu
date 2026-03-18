@@ -26,6 +26,7 @@
 
 #include <rmm/device_buffer.hpp>
 
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,84 @@
 
 namespace cuopt {
 namespace cython {
+
+namespace {
+
+void set_new_bounds_batch(
+  cuopt::linear_programming::optimization_problem_interface_t<int, double>* problem_interface,
+  cuopt::linear_programming::solver_settings_t<int, double>* solver_settings,
+  const std::vector<int>& new_bounds_idx,
+  const std::vector<double>& new_bounds_lower,
+  const std::vector<double>& new_bounds_upper)
+{
+  cuopt_expects(new_bounds_idx.size() == new_bounds_lower.size() &&
+                  new_bounds_idx.size() == new_bounds_upper.size(),
+                error_type_t::ValidationError,
+                "new_bounds_idx, new_bounds_lower, and new_bounds_upper must have the same size.");
+  cuopt_expects(!new_bounds_idx.empty(),
+                error_type_t::ValidationError,
+                "SolveNewBoundsBatch requires at least one bound change.");
+
+  auto& pdlp_settings = solver_settings->get_pdlp_settings();
+  pdlp_settings.new_bounds.clear();
+  pdlp_settings.new_bounds.reserve(new_bounds_idx.size());
+
+  const auto n_variables = problem_interface->get_n_variables();
+  for (std::size_t i = 0; i < new_bounds_idx.size(); ++i) {
+    cuopt_expects(new_bounds_idx[i] >= 0 && new_bounds_idx[i] < n_variables,
+                  error_type_t::ValidationError,
+                  "new_bounds_idx contains a variable index outside the valid range.");
+    cuopt_expects(new_bounds_lower[i] <= new_bounds_upper[i],
+                  error_type_t::ValidationError,
+                  "Each new lower bound must be less than or equal to the new upper bound.");
+    pdlp_settings.new_bounds.emplace_back(
+      new_bounds_idx[i], new_bounds_lower[i], new_bounds_upper[i]);
+  }
+}
+
+linear_programming_batch_ret_t to_python_batch_ret(
+  const cuopt::linear_programming::lp_solution_interface_t<int, double>& solution_interface,
+  int batch_size)
+{
+  linear_programming_batch_ret_t response;
+
+  response.primal_solution_ = solution_interface.get_primal_solution_host();
+  response.dual_solution_   = solution_interface.get_dual_solution_host();
+  response.reduced_cost_    = solution_interface.get_reduced_cost_host();
+
+  response.termination_status_.reserve(batch_size);
+  response.l2_primal_residual_.reserve(batch_size);
+  response.l2_dual_residual_.reserve(batch_size);
+  response.primal_objective_.reserve(batch_size);
+  response.dual_objective_.reserve(batch_size);
+  response.gap_.reserve(batch_size);
+  response.nb_iterations_.reserve(batch_size);
+  response.solved_by_pdlp_.reserve(batch_size);
+
+  for (int i = 0; i < batch_size; ++i) {
+    response.termination_status_.push_back(
+      static_cast<int>(solution_interface.get_termination_status(i)));
+    response.l2_primal_residual_.push_back(solution_interface.get_l2_primal_residual(i));
+    response.l2_dual_residual_.push_back(solution_interface.get_l2_dual_residual(i));
+    response.primal_objective_.push_back(solution_interface.get_objective_value(i));
+    response.dual_objective_.push_back(solution_interface.get_dual_objective_value(i));
+    response.gap_.push_back(solution_interface.get_gap(i));
+    response.nb_iterations_.push_back(solution_interface.get_num_iterations(i));
+    response.solved_by_pdlp_.push_back(solution_interface.is_solved_by_pdlp(i) ? 1 : 0);
+  }
+
+  response.error_status_ = solution_interface.get_error_status().get_error_type();
+  response.error_message_ =
+    std::string(solution_interface.get_error_status().what());
+  response.batch_size_  = batch_size;
+  response.primal_size_ = solution_interface.get_primal_solution_size();
+  response.dual_size_   = solution_interface.get_dual_solution_size();
+  response.solve_time_  = solution_interface.get_solve_time();
+
+  return response;
+}
+
+}  // namespace
 
 /**
  * @brief Wrapper for linear_programming to expose the API to cython
@@ -285,6 +364,51 @@ std::pair<std::vector<std::unique_ptr<solver_ret_t>>, double> call_batch_solve(
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start_solver);
 
   return {std::move(list), duration.count() / 1000.0};
+}
+
+std::unique_ptr<linear_programming_batch_ret_t> call_new_bounds_batch_solve(
+  cuopt::mps_parser::data_model_view_t<int, double>* data_model,
+  cuopt::linear_programming::solver_settings_t<int, double>* solver_settings,
+  const std::vector<int>& new_bounds_idx,
+  const std::vector<double>& new_bounds_lower,
+  const std::vector<double>& new_bounds_upper,
+  unsigned int flags)
+{
+  raft::common::nvtx::range fun_scope("Call new bounds batch solve");
+
+  const int batch_size = static_cast<int>(new_bounds_idx.size());
+  auto memory_backend  = cuopt::linear_programming::get_memory_backend_type();
+
+  if (memory_backend == cuopt::linear_programming::memory_backend_t::GPU) {
+    rmm::cuda_stream stream(static_cast<rmm::cuda_stream::flags>(flags));
+    const raft::handle_t handle_{stream};
+
+    auto problem = cuopt::linear_programming::optimization_problem_t<int, double>(&handle_);
+    cuopt::linear_programming::populate_from_data_model_view(
+      &problem, data_model, solver_settings, &handle_);
+    set_new_bounds_batch(
+      &problem, solver_settings, new_bounds_idx, new_bounds_lower, new_bounds_upper);
+
+    auto lp_solution_ptr =
+      std::unique_ptr<linear_programming::lp_solution_interface_t<int, double>>(
+        call_solve_lp(&problem, solver_settings->get_pdlp_settings(), true));
+
+    return std::make_unique<linear_programming_batch_ret_t>(
+      to_python_batch_ret(*lp_solution_ptr, batch_size));
+  }
+
+  auto cpu_problem = cuopt::linear_programming::cpu_optimization_problem_t<int, double>();
+  cuopt::linear_programming::populate_from_data_model_view(
+    &cpu_problem, data_model, solver_settings, nullptr);
+  set_new_bounds_batch(
+    &cpu_problem, solver_settings, new_bounds_idx, new_bounds_lower, new_bounds_upper);
+
+  auto lp_solution_ptr =
+    std::unique_ptr<linear_programming::lp_solution_interface_t<int, double>>(
+      call_solve_lp(&cpu_problem, solver_settings->get_pdlp_settings(), true));
+
+  return std::make_unique<linear_programming_batch_ret_t>(
+    to_python_batch_ret(*lp_solution_ptr, batch_size));
 }
 
 }  // namespace cython

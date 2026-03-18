@@ -31,12 +31,14 @@ from cuopt.linear_programming.data_model.data_model cimport data_model_view_t
 from cuopt.linear_programming.data_model.data_model_wrapper cimport DataModel
 from cuopt.linear_programming.solver.solver cimport (
     call_batch_solve,
+    call_new_bounds_batch_solve,
     call_solve,
     error_type_t,
     get_cpu_lp_solutions,
     get_cpu_mip_solution,
     get_gpu_lp_solutions,
     get_gpu_mip_solution,
+    linear_programming_batch_ret_t,
     linear_programming_ret_t,
     lp_cpu_solutions_t,
     lp_gpu_solutions_t,
@@ -122,6 +124,15 @@ cdef object _vector_to_numpy(const vector[double]& vec):
         return np.array([], dtype=np.float64)
     cdef const double* data_ptr = vec.data()
     return np.asarray(<double[:size]> data_ptr, dtype=np.float64).copy()
+
+
+cdef object _vector_int_to_numpy(const vector[int]& vec):
+    """Convert C++ std::vector<int> to numpy array"""
+    cdef Py_ssize_t size = vec.size()
+    if size == 0:
+        return np.array([], dtype=np.int32)
+    cdef const int* data_ptr = vec.data()
+    return np.asarray(<int[:size]> data_ptr, dtype=np.int32).copy()
 
 
 def get_data_ptr(array):
@@ -564,3 +575,98 @@ def BatchSolve(py_data_model_list, settings):
         )
 
     return solutions, solve_time
+
+
+def SolveNewBoundsBatch(
+        py_data_model_obj,
+        settings,
+        new_bounds_idx,
+        new_bounds_lower,
+        new_bounds_upper):
+    cdef DataModel data_model_obj = <DataModel>py_data_model_obj
+    cdef unique_ptr[solver_settings_t[int, double]] unique_solver_settings
+    cdef unique_ptr[linear_programming_batch_ret_t] batch_ret_ptr
+    cdef vector[int] c_new_bounds_idx
+    cdef vector[double] c_new_bounds_lower
+    cdef vector[double] c_new_bounds_upper
+    cdef linear_programming_batch_ret_t* batch_ptr
+
+    if settings.get_pdlp_warm_start_data() is not None:  # noqa
+        raise Exception("Cannot use warmstart data with SolveNewBoundsBatch")
+
+    idx_array = np.ascontiguousarray(new_bounds_idx, dtype=np.int32).reshape(-1)
+    lower_array = np.ascontiguousarray(
+        new_bounds_lower, dtype=np.float64
+    ).reshape(-1)
+    upper_array = np.ascontiguousarray(
+        new_bounds_upper, dtype=np.float64
+    ).reshape(-1)
+
+    if idx_array.shape[0] == 0:
+        raise Exception("SolveNewBoundsBatch requires at least one bound change")
+    if (
+        idx_array.shape[0] != lower_array.shape[0]
+        or idx_array.shape[0] != upper_array.shape[0]
+    ):
+        raise Exception(
+            "new_bounds_idx, new_bounds_lower, and new_bounds_upper must "
+            "have the same size"
+        )
+
+    unique_solver_settings.reset(new solver_settings_t[int, double]())
+    set_solver_setting(unique_solver_settings, settings, data_model_obj, False)
+    data_model_obj.set_data_model_view()
+
+    for i in range(idx_array.shape[0]):
+        c_new_bounds_idx.push_back(<int>idx_array[i])
+        c_new_bounds_lower.push_back(<double>lower_array[i])
+        c_new_bounds_upper.push_back(<double>upper_array[i])
+
+    batch_ret_ptr = move(call_new_bounds_batch_solve(
+        data_model_obj.c_data_model_view.get(),
+        unique_solver_settings.get(),
+        c_new_bounds_idx,
+        c_new_bounds_lower,
+        c_new_bounds_upper,
+    ))
+    batch_ptr = batch_ret_ptr.get()
+
+    batch_size = batch_ptr.batch_size_
+    primal_size = batch_ptr.primal_size_
+    dual_size = batch_ptr.dual_size_
+
+    primal_solution = _vector_to_numpy(batch_ptr.primal_solution_).reshape(
+        (batch_size, primal_size)
+    )
+    dual_solution = _vector_to_numpy(batch_ptr.dual_solution_).reshape(
+        (batch_size, dual_size)
+    )
+    reduced_cost = _vector_to_numpy(batch_ptr.reduced_cost_).reshape(
+        (batch_size, primal_size)
+    )
+
+    termination_status = _vector_int_to_numpy(batch_ptr.termination_status_)
+    nb_iterations = _vector_int_to_numpy(batch_ptr.nb_iterations_)
+    solved_by_pdlp = _vector_int_to_numpy(batch_ptr.solved_by_pdlp_).astype(
+        np.bool_
+    )
+
+    return {
+        "batch_size": batch_size,
+        "num_variables": primal_size,
+        "num_constraints": dual_size,
+        "solve_time": batch_ptr.solve_time_,
+        "error_status": ErrorStatus(batch_ptr.error_status_),
+        "error_message": batch_ptr.error_message_.decode("utf-8"),
+        "primal_solution": primal_solution,
+        "dual_solution": dual_solution,
+        "reduced_cost": reduced_cost,
+        "termination_status": termination_status,
+        "primal_residual": _vector_to_numpy(batch_ptr.l2_primal_residual_),
+        "dual_residual": _vector_to_numpy(batch_ptr.l2_dual_residual_),
+        "primal_objective": _vector_to_numpy(batch_ptr.primal_objective_),
+        "dual_objective": _vector_to_numpy(batch_ptr.dual_objective_),
+        "gap": _vector_to_numpy(batch_ptr.gap_),
+        "nb_iterations": nb_iterations,
+        "solved_by_pdlp": solved_by_pdlp,
+    }

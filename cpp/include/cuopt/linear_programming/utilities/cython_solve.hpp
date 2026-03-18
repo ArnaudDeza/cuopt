@@ -64,5 +64,13 @@ std::pair<std::vector<std::unique_ptr<solver_ret_t>>, double> call_batch_solve(
   std::vector<cuopt::mps_parser::data_model_view_t<int, double>*>,
   linear_programming::solver_settings_t<int, double>*);
 
+std::unique_ptr<linear_programming_batch_ret_t> call_new_bounds_batch_solve(
+  cuopt::mps_parser::data_model_view_t<int, double>* data_model,
+  linear_programming::solver_settings_t<int, double>* solver_settings,
+  const std::vector<int>& new_bounds_idx,
+  const std::vector<double>& new_bounds_lower,
+  const std::vector<double>& new_bounds_upper,
+  unsigned int flags = cudaStreamNonBlocking);
+
 }  // namespace cython
 }  // namespace cuopt

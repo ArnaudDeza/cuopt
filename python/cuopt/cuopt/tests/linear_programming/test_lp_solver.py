@@ -497,6 +497,64 @@ def test_parser_and_batch_solver():
         )
 
 
+def test_new_bounds_batch_solver():
+    file_path = (
+        RAPIDS_DATASET_ROOT_DIR + "/linear_programming/afiro_original.mps"
+    )
+    data_model_obj = cuopt_mps_parser.ParseMps(file_path)
+
+    settings = solver_settings.SolverSettings()
+    settings.set_parameter(CUOPT_METHOD, SolverMethod.PDLP)
+    settings.set_parameter(CUOPT_PDLP_SOLVER_MODE, PDLPSolverMode.Stable2)
+    settings.set_parameter(CUOPT_PRESOLVE, 0)
+
+    ref_data_model = cuopt_mps_parser.ParseMps(file_path)
+    ref_lower_bounds = ref_data_model.get_variable_lower_bounds().copy()
+    ref_upper_bounds = ref_data_model.get_variable_upper_bounds().copy()
+    ref_lower_bounds[5] = 4.0
+    ref_upper_bounds[5] = 5.0
+    ref_data_model.set_variable_lower_bounds(ref_lower_bounds)
+    ref_data_model.set_variable_upper_bounds(ref_upper_bounds)
+
+    ref_solution = solver.Solve(ref_data_model, settings)
+    base_solution = solver.Solve(cuopt_mps_parser.ParseMps(file_path), settings)
+
+    variable_lower_bounds = data_model_obj.get_variable_lower_bounds()
+    variable_upper_bounds = data_model_obj.get_variable_upper_bounds()
+
+    batch_solution = solver.SolveNewBoundsBatch(
+        data_model_obj,
+        np.array([5, 0], dtype=np.int32),
+        np.array([4.0, variable_lower_bounds[0]], dtype=np.float64),
+        np.array([5.0, variable_upper_bounds[0]], dtype=np.float64),
+        settings,
+    )
+
+    assert batch_solution["batch_size"] == 2
+    assert batch_solution["num_variables"] == len(
+        data_model_obj.get_objective_coefficients()
+    )
+    assert batch_solution["num_constraints"] == len(
+        data_model_obj.get_constraint_bounds()
+    )
+
+    assert batch_solution["termination_status"][0] == int(
+        LPTerminationStatus.Optimal
+    )
+    assert batch_solution["termination_status"][1] == int(
+        LPTerminationStatus.Optimal
+    )
+    assert batch_solution["solved_by_pdlp"][0]
+    assert batch_solution["solved_by_pdlp"][1]
+
+    assert batch_solution["primal_objective"][0] == pytest.approx(
+        ref_solution.get_primal_objective()
+    )
+    assert batch_solution["primal_objective"][1] == pytest.approx(
+        base_solution.get_primal_objective()
+    )
+
+
 def test_warm_start():
     file_path = RAPIDS_DATASET_ROOT_DIR + "/linear_programming/a2864/a2864.mps"
     data_model_obj = cuopt_mps_parser.ParseMps(file_path)

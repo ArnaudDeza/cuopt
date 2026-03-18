@@ -183,3 +183,31 @@ def BatchSolve(data_model_list, solver_settings=None):
         solver_settings = SolverSettings()
 
     return solver_wrapper.BatchSolve(data_model_list, solver_settings)
+
+
+@catch_cuopt_exception
+def SolveNewBoundsBatch(
+    data_model,
+    new_bounds_idx,
+    new_bounds_lower,
+    new_bounds_upper,
+    solver_settings=None,
+):
+    """
+    Solve a shared-matrix batch of LPs where each batch element overrides one
+    variable bound pair `(idx, lower, upper)`.
+
+    This is a thin Python entrypoint for the internal batched PDLP path used by
+    strong branching. The solve runs in C++/CUDA and returns NumPy arrays on the
+    Python side.
+    """
+    if solver_settings is None:
+        solver_settings = SolverSettings()
+
+    return solver_wrapper.SolveNewBoundsBatch(
+        data_model,
+        solver_settings,
+        new_bounds_idx,
+        new_bounds_lower,
+        new_bounds_upper,
+    )
